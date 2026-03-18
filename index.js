@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -19,14 +20,33 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+function normalizeChain(chain) {
+  if (!chain || typeof chain !== 'string') return null;
+
+  const value = chain.trim().toUpperCase();
+
+  if (value === 'BNB' || value === 'BSC' || value === 'BEP20') return 'BNB';
+  if (value === 'TRON' || value === 'TRC20') return 'TRON';
+  if (value === 'SOLANA' || value === 'SPL') return 'SOLANA';
+
+  return null;
+}
+
+function generateOrderId() {
+  return `CRDX-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+}
+
+// ROUTE BASE
 app.get('/', (req, res) => {
   res.send('Il backend CARDIX con Supabase è in esecuzione 🚀');
 });
 
+// HEALTH CHECK
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// REGISTRAZIONE WALLET
 app.post('/register', async (req, res) => {
   try {
     const { wallet } = req.body;
@@ -68,9 +88,63 @@ app.post('/register', async (req, res) => {
   }
 });
 
+// RESTITUISCE IL WALLET UFFICIALE IN BASE ALLA RETE
+app.get('/payment-wallet/:chain', async (req, res) => {
+  try {
+    const normalizedChain = normalizeChain(req.params.chain);
+
+    if (!normalizedChain) {
+      return res.status(400).json({
+        success: false,
+        error: 'Rete non valida. Usa BNB, TRON o SOLANA'
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('payment_wallets')
+      .select('chain, wallet_address, token_symbol, is_active')
+      .eq('chain', normalizedChain)
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (error) {
+      console.error('Errore Supabase /payment-wallet:', error.message);
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        error: 'Wallet di pagamento non trovato per questa rete'
+      });
+    }
+
+    return res.json({
+      success: true,
+      payment_wallet: data
+    });
+  } catch (err) {
+    console.error('Errore server /payment-wallet:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Errore interno del server'
+    });
+  }
+});
+
+// CREA ORDINE PREVENDITA PENDING
 app.post('/create-order', async (req, res) => {
   try {
-    const { wallet, payment_token, amount_paid, cardix_amount, tx_hash } = req.body;
+    const {
+      wallet,
+      payment_chain,
+      expected_amount,
+      cardix_amount,
+      notes
+    } = req.body;
 
     if (!wallet || typeof wallet !== 'string' || wallet.trim() === '') {
       return res.status(400).json({
@@ -79,24 +153,26 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
-    if (!payment_token || typeof payment_token !== 'string' || payment_token.trim() === '') {
+    const normalizedChain = normalizeChain(payment_chain);
+
+    if (!normalizedChain) {
       return res.status(400).json({
         success: false,
-        error: 'payment_token mancante o non valido'
+        error: 'payment_chain non valida. Usa BNB, TRON o SOLANA'
       });
     }
 
-    const paid = Number(amount_paid);
-    const cardix = Number(cardix_amount);
+    const expectedAmountNumber = Number(expected_amount);
+    const cardixAmountNumber = Number(cardix_amount);
 
-    if (Number.isNaN(paid) || paid <= 0) {
+    if (Number.isNaN(expectedAmountNumber) || expectedAmountNumber <= 0) {
       return res.status(400).json({
         success: false,
-        error: 'amount_paid non valido'
+        error: 'expected_amount non valido'
       });
     }
 
-    if (Number.isNaN(cardix) || cardix <= 0) {
+    if (Number.isNaN(cardixAmountNumber) || cardixAmountNumber <= 0) {
       return res.status(400).json({
         success: false,
         error: 'cardix_amount non valido'
@@ -104,9 +180,10 @@ app.post('/create-order', async (req, res) => {
     }
 
     const cleanWallet = wallet.trim();
-    const cleanPaymentToken = payment_token.trim().toUpperCase();
-    const cleanTxHash = tx_hash ? String(tx_hash).trim() : null;
+    const cleanNotes =
+      notes && typeof notes === 'string' ? notes.trim() : null;
 
+    // assicura investitore
     const { error: investorError } = await supabase
       .from('investors')
       .upsert(
@@ -122,19 +199,49 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
+    // prende il wallet corretto per la rete scelta
+    const { data: paymentWallet, error: walletError } = await supabase
+      .from('payment_wallets')
+      .select('chain, wallet_address, token_symbol, is_active')
+      .eq('chain', normalizedChain)
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (walletError) {
+      console.error('Errore Supabase payment_wallets:', walletError.message);
+      return res.status(500).json({
+        success: false,
+        error: walletError.message
+      });
+    }
+
+    if (!paymentWallet) {
+      return res.status(404).json({
+        success: false,
+        error: 'Wallet di pagamento non configurato per questa rete'
+      });
+    }
+
+    const orderId = generateOrderId();
+
+    const insertPayload = {
+      order_id: orderId,
+      wallet_address: cleanWallet,
+      payment_chain: normalizedChain,
+      payment_token: 'USDT',
+      to_wallet: paymentWallet.wallet_address,
+      expected_amount: expectedAmountNumber,
+      amount_paid: 0,
+      cardix_amount: cardixAmountNumber,
+      status: 'pending',
+      notes: cleanNotes
+    };
+
     const { data, error } = await supabase
       .from('presale_orders')
-      .insert([
-        {
-          wallet_address: cleanWallet,
-          payment_token: cleanPaymentToken,
-          amount_paid: paid,
-          cardix_amount: cardix,
-          status: 'pending',
-          tx_hash: cleanTxHash
-        }
-      ])
-      .select();
+      .insert([insertPayload])
+      .select()
+      .single();
 
     if (error) {
       console.error('Errore Supabase /create-order:', error.message);
@@ -146,7 +253,13 @@ app.post('/create-order', async (req, res) => {
 
     return res.json({
       success: true,
-      order: data[0]
+      order: data,
+      payment_instructions: {
+        chain: normalizedChain,
+        token: 'USDT',
+        wallet_address: paymentWallet.wallet_address,
+        amount_to_send: expectedAmountNumber
+      }
     });
   } catch (err) {
     console.error('Errore server /create-order:', err.message);
@@ -157,6 +270,7 @@ app.post('/create-order', async (req, res) => {
   }
 });
 
+// ORDINI PER WALLET
 app.get('/orders/:wallet', async (req, res) => {
   try {
     const wallet = req.params.wallet;
