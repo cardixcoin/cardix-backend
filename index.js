@@ -9,6 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
+const PRICE_PER_CARDIX = 0.0001; // 1 CARDIX = 0.0001 USDT
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -18,10 +19,12 @@ if (!supabaseUrl || !supabaseKey) {
   process.exit(1);
 }
 
-// Log utili per debug Render/Supabase
 console.log('SUPABASE_URL presente:', !!supabaseUrl);
 console.log('SUPABASE_SERVICE_ROLE_KEY presente:', !!supabaseKey);
-console.log('SUPABASE_SERVICE_ROLE_KEY prefisso:', supabaseKey ? supabaseKey.slice(0, 12) : 'MANCANTE');
+console.log(
+  'SUPABASE_SERVICE_ROLE_KEY prefisso:',
+  supabaseKey ? supabaseKey.slice(0, 12) : 'MANCANTE'
+);
 
 const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
@@ -179,7 +182,6 @@ app.post('/create-order', async (req, res) => {
       wallet,
       payment_chain,
       expected_amount,
-      cardix_amount,
       notes
     } = req.body;
 
@@ -200,7 +202,6 @@ app.post('/create-order', async (req, res) => {
     }
 
     const expectedAmountNumber = Number(expected_amount);
-    const cardixAmountNumber = Number(cardix_amount);
 
     if (Number.isNaN(expectedAmountNumber) || expectedAmountNumber <= 0) {
       return res.status(400).json({
@@ -209,12 +210,10 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
-    if (Number.isNaN(cardixAmountNumber) || cardixAmountNumber <= 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'cardix_amount non valido'
-      });
-    }
+    // Calcolo automatico CARDIX
+    const cardixAmountNumber = Number(
+      (expectedAmountNumber / PRICE_PER_CARDIX).toFixed(2)
+    );
 
     const cleanWallet = wallet.trim();
     const cleanNotes = notes && typeof notes === 'string' ? notes.trim() : null;
@@ -274,6 +273,9 @@ app.post('/create-order', async (req, res) => {
     return res.json({
       success: true,
       order: data,
+      pricing: {
+        price_per_cardix_usdt: PRICE_PER_CARDIX
+      },
       payment_instructions: {
         chain: normalizedChain,
         token: 'USDT',
