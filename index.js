@@ -1,7 +1,6 @@
-const express = require("express");
-const cors = require("cors");
-const { createClient } = require("@supabase/supabase-js");
-require("dotenv").config();
+const express = require('express');
+const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 
@@ -10,55 +9,72 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+if (!supabaseUrl || !supabaseKey) {
+  console.error('Mancano SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY nelle environment variables.');
+  process.exit(1);
+}
 
-app.get("/", (req, res) => {
-  res.send("CARDIX backend with Supabase is running 🚀");
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// ROUTE BASE
+app.get('/', (req, res) => {
+  res.send('Il backend CARDIX con Supabase è in esecuzione 🚀');
 });
 
-app.post("/buy", async (req, res) => {
+// HEALTH CHECK
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// REGISTRAZIONE WALLET
+app.post('/register', async (req, res) => {
   try {
-    const { wallet, amount_usdt, cdx_amount, tx_signature } = req.body;
+    const { wallet } = req.body;
 
-    if (!wallet || !amount_usdt || !cdx_amount || !tx_signature) {
-      return res.status(400).json({ error: "Missing data" });
-    }
-
-    const { data: investor } = await supabase
-      .from("investors")
-      .select("*")
-      .eq("wallet_address", wallet)
-      .maybeSingle();
-
-    if (!investor) {
-      await supabase.from("investors").insert({
-        wallet_address: wallet,
-        total_balance: cdx_amount,
-        claimed_balance: 0
+    if (!wallet || typeof wallet !== 'string' || wallet.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Wallet mancante o non valido'
       });
-    } else {
-      await supabase.from("investors").update({
-        total_balance: Number(investor.total_balance) + Number(cdx_amount)
-      }).eq("wallet_address", wallet);
     }
 
-    await supabase.from("orders").insert({
-      wallet_address: wallet,
-      tx_signature,
-      amount_usdt,
-      cdx_amount
+    const cleanWallet = wallet.trim();
+
+    const { error } = await supabase
+      .from('investors')
+      .upsert(
+        {
+          wallet_address: cleanWallet
+        },
+        {
+          onConflict: 'wallet_address'
+        }
+      );
+
+    if (error) {
+      console.error('Errore Supabase /register:', error.message);
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    return res.json({
+      success: true,
+      wallet: cleanWallet
     });
-
-    res.json({ success: true });
-
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Errore server /register:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Errore interno del server'
+    });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server CARDIX attivo sulla porta ${PORT}`);
 });
