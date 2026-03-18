@@ -18,7 +18,17 @@ if (!supabaseUrl || !supabaseKey) {
   process.exit(1);
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Log utili per debug Render/Supabase
+console.log('SUPABASE_URL presente:', !!supabaseUrl);
+console.log('SUPABASE_SERVICE_ROLE_KEY presente:', !!supabaseKey);
+console.log('SUPABASE_SERVICE_ROLE_KEY prefisso:', supabaseKey ? supabaseKey.slice(0, 12) : 'MANCANTE');
+
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false
+  }
+});
 
 function normalizeChain(chain) {
   if (!chain || typeof chain !== 'string') return null;
@@ -36,6 +46,20 @@ function generateOrderId() {
   return `CRDX-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 }
 
+function handleSupabaseError(context, error, res) {
+  console.error(`Errore Supabase ${context}:`, {
+    message: error?.message || null,
+    code: error?.code || null,
+    details: error?.details || null,
+    hint: error?.hint || null
+  });
+
+  return res.status(500).json({
+    success: false,
+    error: error?.message || 'Errore database'
+  });
+}
+
 // ROUTE BASE
 app.get('/', (req, res) => {
   res.send('Il backend CARDIX con Supabase è in esecuzione 🚀');
@@ -44,6 +68,32 @@ app.get('/', (req, res) => {
 // HEALTH CHECK
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// TEST CONNESSIONE PAYMENT_WALLETS
+app.get('/test-payment-wallets', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .schema('public')
+      .from('payment_wallets')
+      .select('chain, wallet_address, token_symbol, is_active')
+      .limit(5);
+
+    if (error) {
+      return handleSupabaseError('/test-payment-wallets', error, res);
+    }
+
+    return res.json({
+      success: true,
+      rows: data
+    });
+  } catch (err) {
+    console.error('Errore server /test-payment-wallets:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Errore interno del server'
+    });
+  }
 });
 
 // REGISTRAZIONE WALLET
@@ -61,6 +111,7 @@ app.post('/register', async (req, res) => {
     const cleanWallet = wallet.trim();
 
     const { error } = await supabase
+      .schema('public')
       .from('investors')
       .upsert(
         [{ wallet_address: cleanWallet }],
@@ -68,11 +119,7 @@ app.post('/register', async (req, res) => {
       );
 
     if (error) {
-      console.error('Errore Supabase /register:', error.message);
-      return res.status(500).json({
-        success: false,
-        error: error.message
-      });
+      return handleSupabaseError('/register', error, res);
     }
 
     return res.json({
@@ -101,25 +148,15 @@ app.get('/payment-wallet/:chain', async (req, res) => {
     }
 
     const { data, error } = await supabase
+      .schema('public')
       .from('payment_wallets')
       .select('chain, wallet_address, token_symbol, is_active')
       .eq('chain', normalizedChain)
       .eq('is_active', true)
-      .maybeSingle();
+      .single();
 
     if (error) {
-      console.error('Errore Supabase /payment-wallet:', error.message);
-      return res.status(500).json({
-        success: false,
-        error: error.message
-      });
-    }
-
-    if (!data) {
-      return res.status(404).json({
-        success: false,
-        error: 'Wallet di pagamento non trovato per questa rete'
-      });
+      return handleSupabaseError('/payment-wallet', error, res);
     }
 
     return res.json({
@@ -180,11 +217,11 @@ app.post('/create-order', async (req, res) => {
     }
 
     const cleanWallet = wallet.trim();
-    const cleanNotes =
-      notes && typeof notes === 'string' ? notes.trim() : null;
+    const cleanNotes = notes && typeof notes === 'string' ? notes.trim() : null;
 
     // assicura investitore
     const { error: investorError } = await supabase
+      .schema('public')
       .from('investors')
       .upsert(
         [{ wallet_address: cleanWallet }],
@@ -192,34 +229,20 @@ app.post('/create-order', async (req, res) => {
       );
 
     if (investorError) {
-      console.error('Errore Supabase investor upsert:', investorError.message);
-      return res.status(500).json({
-        success: false,
-        error: investorError.message
-      });
+      return handleSupabaseError('investor upsert', investorError, res);
     }
 
     // prende il wallet corretto per la rete scelta
     const { data: paymentWallet, error: walletError } = await supabase
+      .schema('public')
       .from('payment_wallets')
       .select('chain, wallet_address, token_symbol, is_active')
       .eq('chain', normalizedChain)
       .eq('is_active', true)
-      .maybeSingle();
+      .single();
 
     if (walletError) {
-      console.error('Errore Supabase payment_wallets:', walletError.message);
-      return res.status(500).json({
-        success: false,
-        error: walletError.message
-      });
-    }
-
-    if (!paymentWallet) {
-      return res.status(404).json({
-        success: false,
-        error: 'Wallet di pagamento non configurato per questa rete'
-      });
+      return handleSupabaseError('payment_wallets select', walletError, res);
     }
 
     const orderId = generateOrderId();
@@ -238,17 +261,14 @@ app.post('/create-order', async (req, res) => {
     };
 
     const { data, error } = await supabase
+      .schema('public')
       .from('presale_orders')
       .insert([insertPayload])
       .select()
       .single();
 
     if (error) {
-      console.error('Errore Supabase /create-order:', error.message);
-      return res.status(500).json({
-        success: false,
-        error: error.message
-      });
+      return handleSupabaseError('/create-order', error, res);
     }
 
     return res.json({
@@ -285,17 +305,14 @@ app.get('/orders/:wallet', async (req, res) => {
     const cleanWallet = wallet.trim();
 
     const { data, error } = await supabase
+      .schema('public')
       .from('presale_orders')
       .select('*')
       .eq('wallet_address', cleanWallet)
       .order('created_at', { ascending: false });
 
     if (error) {
-      console.error('Errore Supabase /orders:', error.message);
-      return res.status(500).json({
-        success: false,
-        error: error.message
-      });
+      return handleSupabaseError('/orders', error, res);
     }
 
     return res.json({
