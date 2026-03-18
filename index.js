@@ -1,4 +1,4 @@
-  const express = require('express');
+const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 
@@ -19,17 +19,14 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// ROUTE BASE
 app.get('/', (req, res) => {
   res.send('Il backend CARDIX con Supabase è in esecuzione 🚀');
 });
 
-// HEALTH CHECK
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// REGISTRAZIONE WALLET
 app.post('/register', async (req, res) => {
   try {
     const { wallet } = req.body;
@@ -71,10 +68,9 @@ app.post('/register', async (req, res) => {
   }
 });
 
-// CREAZIONE ORDINE PREVENDITA
 app.post('/create-order', async (req, res) => {
   try {
-    const { wallet, payment_token, amount_paid, cardix_amount } = req.body;
+    const { wallet, payment_token, amount_paid, cardix_amount, tx_hash } = req.body;
 
     if (!wallet || typeof wallet !== 'string' || wallet.trim() === '') {
       return res.status(400).json({
@@ -109,8 +105,8 @@ app.post('/create-order', async (req, res) => {
 
     const cleanWallet = wallet.trim();
     const cleanPaymentToken = payment_token.trim().toUpperCase();
+    const cleanTxHash = tx_hash ? String(tx_hash).trim() : null;
 
-    // assicura che l'investitore esista
     const { error: investorError } = await supabase
       .from('investors')
       .upsert(
@@ -126,7 +122,6 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
-    // crea l'ordine
     const { data, error } = await supabase
       .from('presale_orders')
       .insert([
@@ -135,7 +130,8 @@ app.post('/create-order', async (req, res) => {
           payment_token: cleanPaymentToken,
           amount_paid: paid,
           cardix_amount: cardix,
-          status: 'pending'
+          status: 'pending',
+          tx_hash: cleanTxHash
         }
       ])
       .select();
@@ -161,7 +157,6 @@ app.post('/create-order', async (req, res) => {
   }
 });
 
-// RECUPERA ORDINI DI UN WALLET
 app.get('/orders/:wallet', async (req, res) => {
   try {
     const wallet = req.params.wallet;
