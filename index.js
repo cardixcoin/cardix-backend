@@ -21,10 +21,6 @@ if (!supabaseUrl || !supabaseKey) {
 
 console.log('SUPABASE_URL presente:', !!supabaseUrl);
 console.log('SUPABASE_SERVICE_ROLE_KEY presente:', !!supabaseKey);
-console.log(
-  'SUPABASE_SERVICE_ROLE_KEY prefisso:',
-  supabaseKey ? supabaseKey.slice(0, 12) : 'MANCANTE'
-);
 
 const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
@@ -73,14 +69,13 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// TEST CONNESSIONE PAYMENT_WALLETS
+// TEST PAYMENT WALLETS
 app.get('/test-payment-wallets', async (req, res) => {
   try {
     const { data, error } = await supabase
-      .schema('public')
       .from('payment_wallets')
       .select('chain, wallet_address, token_symbol, is_active')
-      .limit(5);
+      .limit(10);
 
     if (error) {
       return handleSupabaseError('/test-payment-wallets', error, res);
@@ -99,7 +94,7 @@ app.get('/test-payment-wallets', async (req, res) => {
   }
 });
 
-// REGISTRAZIONE WALLET
+// REGISTRA WALLET
 app.post('/register', async (req, res) => {
   try {
     const { wallet } = req.body;
@@ -114,7 +109,6 @@ app.post('/register', async (req, res) => {
     const cleanWallet = wallet.trim();
 
     const { error } = await supabase
-      .schema('public')
       .from('investors')
       .upsert(
         [{ wallet_address: cleanWallet }],
@@ -138,7 +132,7 @@ app.post('/register', async (req, res) => {
   }
 });
 
-// RESTITUISCE IL WALLET UFFICIALE IN BASE ALLA RETE
+// RESTITUISCE IL WALLET UFFICIALE
 app.get('/payment-wallet/:chain', async (req, res) => {
   try {
     const normalizedChain = normalizeChain(req.params.chain);
@@ -151,7 +145,6 @@ app.get('/payment-wallet/:chain', async (req, res) => {
     }
 
     const { data, error } = await supabase
-      .schema('public')
       .from('payment_wallets')
       .select('chain, wallet_address, token_symbol, is_active')
       .eq('chain', normalizedChain)
@@ -175,7 +168,7 @@ app.get('/payment-wallet/:chain', async (req, res) => {
   }
 });
 
-// CREA ORDINE PREVENDITA PENDING
+// CREA ORDINE PREVENDITA
 app.post('/create-order', async (req, res) => {
   try {
     const {
@@ -210,17 +203,16 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
-    // Calcolo automatico CARDIX
     const cardixAmountNumber = Number(
       (expectedAmountNumber / PRICE_PER_CARDIX).toFixed(2)
     );
 
     const cleanWallet = wallet.trim();
-    const cleanNotes = notes && typeof notes === 'string' ? notes.trim() : null;
+    const cleanNotes =
+      notes && typeof notes === 'string' ? notes.trim() : null;
 
     // assicura investitore
     const { error: investorError } = await supabase
-      .schema('public')
       .from('investors')
       .upsert(
         [{ wallet_address: cleanWallet }],
@@ -231,9 +223,8 @@ app.post('/create-order', async (req, res) => {
       return handleSupabaseError('investor upsert', investorError, res);
     }
 
-    // prende il wallet corretto per la rete scelta
+    // prende wallet corretto per rete
     const { data: paymentWallet, error: walletError } = await supabase
-      .schema('public')
       .from('payment_wallets')
       .select('chain, wallet_address, token_symbol, is_active')
       .eq('chain', normalizedChain)
@@ -260,7 +251,6 @@ app.post('/create-order', async (req, res) => {
     };
 
     const { data, error } = await supabase
-      .schema('public')
       .from('presale_orders')
       .insert([insertPayload])
       .select()
@@ -307,7 +297,6 @@ app.get('/orders/:wallet', async (req, res) => {
     const cleanWallet = wallet.trim();
 
     const { data, error } = await supabase
-      .schema('public')
       .from('presale_orders')
       .select('*')
       .eq('wallet_address', cleanWallet)
