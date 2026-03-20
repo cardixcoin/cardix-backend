@@ -1,7 +1,6 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import axios from "axios";
 import bs58 from "bs58";
 import {
   Connection,
@@ -18,8 +17,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ================= ENV CHECK ================= */
-
 const requiredEnv = [
   "RPC_URL",
   "DISTRIBUTOR_PRIVATE_KEY",
@@ -35,49 +32,30 @@ for (const key of requiredEnv) {
   }
 }
 
-/* ================= CONNECTION ================= */
-
 const connection = new Connection(process.env.RPC_URL, "confirmed");
-
-/* ================= WALLET ================= */
 
 let distributor;
 
 try {
   const privateKey = process.env.DISTRIBUTOR_PRIVATE_KEY.trim();
   distributor = Keypair.fromSecretKey(bs58.decode(privateKey));
-
   console.log("✅ Distributor wallet:", distributor.publicKey.toBase58());
 } catch (err) {
   console.error("❌ INVALID PRIVATE KEY");
   throw err;
 }
 
-/* ================= CONFIG ================= */
-
 const MINT = new PublicKey(process.env.CARDIX_MINT);
 const TREASURY = new PublicKey(process.env.TREASURY_WALLET);
-const PRICE = Number(process.env.CARDIX_PRICE_USD);
-const DECIMALS = Number(process.env.CARDIX_DECIMALS);
+const PRICE = Number(process.env.CARDIX_PRICE_USD);      // 0.0001
+const DECIMALS = Number(process.env.CARDIX_DECIMALS);    // 6
+const FIXED_SOL_PRICE = 80; // 1 SOL = 80 USD
 
 const processedTransactions = new Set();
-
-/* ================= SOL PRICE ================= */
-
-async function getSolPrice() {
-  const res = await axios.get(
-    "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
-  );
-  return res.data.solana.usd;
-}
-
-/* ================= ROUTES ================= */
 
 app.get("/", (_req, res) => {
   res.json({ ok: true, message: "CARDIX backend running" });
 });
-
-/* ================= BUY ================= */
 
 app.post("/buy", async (req, res) => {
   try {
@@ -106,22 +84,18 @@ app.post("/buy", async (req, res) => {
     if (tx.meta?.err) throw new Error("Transaction failed");
 
     const buyerPk = new PublicKey(buyer);
+    const accountKeys = tx.transaction.message.getAccountKeys().staticAccountKeys;
 
-    const accountKeys =
-      tx.transaction.message.getAccountKeys().staticAccountKeys;
+    const buyerIndex = accountKeys.findIndex((k) => k.equals(buyerPk));
+    const treasuryIndex = accountKeys.findIndex((k) => k.equals(TREASURY));
 
-    const buyerIndex = accountKeys.findIndex((k) =>
-      k.equals(buyerPk)
-    );
-    const treasuryIndex = accountKeys.findIndex((k) =>
-      k.equals(TREASURY)
-    );
-
-    if (buyerIndex === -1)
+    if (buyerIndex === -1) {
       throw new Error("Buyer wallet not found in transaction");
+    }
 
-    if (treasuryIndex === -1)
+    if (treasuryIndex === -1) {
       throw new Error("Treasury wallet not found");
+    }
 
     const preBalances = tx.meta.preBalances;
     const postBalances = tx.meta.postBalances;
@@ -129,26 +103,23 @@ app.post("/buy", async (req, res) => {
     const receivedLamports =
       postBalances[treasuryIndex] - preBalances[treasuryIndex];
 
-    if (receivedLamports <= 0)
+    if (receivedLamports <= 0) {
       throw new Error("No SOL received");
+    }
 
     const solAmount = receivedLamports / LAMPORTS_PER_SOL;
-
     console.log("💰 SOL received:", solAmount);
 
-    const solPrice = await getSolPrice();
+    const solPrice = FIXED_SOL_PRICE;
     const usdValue = solAmount * solPrice;
-
     console.log("💵 USD value:", usdValue);
 
     const tokens = usdValue / PRICE;
+    const amount = BigInt(Math.floor(tokens * 10 ** DECIMALS));
 
-    const amount = BigInt(
-      Math.floor(tokens * 10 ** DECIMALS)
-    );
-
-    if (amount <= 0)
+    if (amount <= 0n) {
       throw new Error("Token amount is zero");
+    }
 
     console.log("🪙 Tokens to send:", tokens);
 
@@ -198,8 +169,6 @@ app.post("/buy", async (req, res) => {
     });
   }
 });
-
-/* ================= SERVER ================= */
 
 app.listen(process.env.PORT || 10000, () => {
   console.log("🚀 CARDIX backend running");
