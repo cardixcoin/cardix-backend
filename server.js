@@ -49,9 +49,9 @@ try {
 
 const MINT = new PublicKey(process.env.CARDIX_MINT);
 const TREASURY = new PublicKey(process.env.TREASURY_WALLET);
-const PRICE = Number(process.env.CARDIX_PRICE_USD);   // es. 0.0001
-const DECIMALS = Number(process.env.CARDIX_DECIMALS); // es. 6
-const FIXED_SOL_PRICE = 80; // 1 SOL = 80 USD
+const PRICE = Number(process.env.CARDIX_PRICE_USD);
+const DECIMALS = Number(process.env.CARDIX_DECIMALS);
+const FIXED_SOL_PRICE = 80;
 
 // Anti-spam / anti-bot
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
@@ -68,6 +68,11 @@ const rateLimitStore = new Map();
 const recentCreateRequests = new Map();
 const sales = [];
 
+// Blockhash cache
+let cachedBlockhash = null;
+let cachedBlockhashAt = 0;
+const BLOCKHASH_CACHE_MS = 20000;
+
 // --------------------------
 // Helpers
 // --------------------------
@@ -77,6 +82,49 @@ function getClientIp(req) {
     return xff.split(",")[0].trim();
   }
   return req.socket.remoteAddress || "unknown";
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRateLimitError(error) {
+  const msg = String(error?.message || error || "").toLowerCase();
+  return msg.includes("429") || msg.includes("too many requests");
+}
+
+async function withRpcRetry(fn, label = "RPC") {
+  const delays = [400, 900, 1600];
+
+  for (let i = 0; i < delays.length + 1; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (!isRateLimitError(error) || i === delays.length) {
+        console.error(`❌ ${label} failed:`, error.message || error);
+        throw error;
+      }
+      console.warn(`⚠️ ${label} rate-limited. Retry ${i + 1}/${delays.length}...`);
+      await sleep(delays[i]);
+    }
+  }
+}
+
+async function getFreshBlockhash(forceRefresh = false) {
+  const now = Date.now();
+
+  if (!forceRefresh && cachedBlockhash && now - cachedBlockhashAt < BLOCKHASH_CACHE_MS) {
+    return cachedBlockhash;
+  }
+
+  const latest = await withRpcRetry(
+    () => connection.getLatestBlockhash("confirmed"),
+    "getLatestBlockhash"
+  );
+
+  cachedBlockhash = latest;
+  cachedBlockhashAt = now;
+  return latest;
 }
 
 function cleanupRateStore() {
@@ -143,7 +191,6 @@ function blockDuplicateCreateRequest(ip, buyer, amount) {
 
   recentCreateRequests.set(key, now);
 
-  // cleanup old
   for (const [k, ts] of recentCreateRequests.entries()) {
     if (now - ts > DUPLICATE_REQUEST_WINDOW_MS) {
       recentCreateRequests.delete(k);
@@ -179,10 +226,14 @@ function getStats() {
 }
 
 async function getConfirmedTransaction(signature) {
-  return connection.getTransaction(signature, {
-    commitment: "confirmed",
-    maxSupportedTransactionVersion: 0
-  });
+  return withRpcRetry(
+    () =>
+      connection.getTransaction(signature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0
+      }),
+    "getTransaction"
+  );
 }
 
 async function extractPurchaseData(signature, buyer) {
@@ -256,29 +307,41 @@ async function processPurchase(signature, buyer) {
     console.log("💵 USD value:", usdValue);
     console.log("🪙 Tokens to send:", tokens);
 
-    const from = await getOrCreateAssociatedTokenAccount(
-      connection,
-      distributor,
-      MINT,
-      distributor.publicKey
+    const from = await withRpcRetry(
+      () =>
+        getOrCreateAssociatedTokenAccount(
+          connection,
+          distributor,
+          MINT,
+          distributor.publicKey
+        ),
+      "getOrCreateAssociatedTokenAccount(from)"
     );
 
-    const to = await getOrCreateAssociatedTokenAccount(
-      connection,
-      distributor,
-      MINT,
-      buyerPk
+    const to = await withRpcRetry(
+      () =>
+        getOrCreateAssociatedTokenAccount(
+          connection,
+          distributor,
+          MINT,
+          buyerPk
+        ),
+      "getOrCreateAssociatedTokenAccount(to)"
     );
 
-    const tokenTx = await transferChecked(
-      connection,
-      distributor,
-      from.address,
-      MINT,
-      to.address,
-      distributor,
-      amountToSend,
-      DECIMALS
+    const tokenTx = await withRpcRetry(
+      () =>
+        transferChecked(
+          connection,
+          distributor,
+          from.address,
+          MINT,
+          to.address,
+          distributor,
+          amountToSend,
+          DECIMALS
+        ),
+      "transferChecked"
     );
 
     processedTransactions.add(signature);
@@ -361,7 +424,7 @@ app.post("/create-transaction", rateLimit, async (req, res) => {
     }
 
     const buyerPk = new PublicKey(buyer);
-    const latest = await connection.getLatestBlockhash("confirmed");
+    const latest = await getFreshBlockhash();
 
     const tx = new Transaction({
       feePayer: buyerPk,
@@ -404,23 +467,35 @@ app.post("/submit-signed-transaction", rateLimit, async (req, res) => {
     }
 
     const rawTx = Buffer.from(signedTransaction, "base64");
+    const tx = Transaction.from(rawTx);
 
-    const signature = await connection.sendRawTransaction(rawTx, {
-      skipPreflight: false,
-      preflightCommitment: "confirmed"
-    });
+    const signature = await withRpcRetry(
+      () =>
+        connection.sendRawTransaction(rawTx, {
+          skipPreflight: false,
+          preflightCommitment: "confirmed"
+        }),
+      "sendRawTransaction"
+    );
 
     console.log("📨 Signed transaction submitted:", signature);
 
-    const txInfo = await connection.getLatestBlockhash("confirmed");
+    const latestBlockHeight = await withRpcRetry(
+      () => connection.getBlockHeight("confirmed"),
+      "getBlockHeight"
+    );
 
-    await connection.confirmTransaction(
-      {
-        signature,
-        blockhash: txInfo.blockhash,
-        lastValidBlockHeight: txInfo.lastValidBlockHeight
-      },
-      "confirmed"
+    await withRpcRetry(
+      () =>
+        connection.confirmTransaction(
+          {
+            signature,
+            blockhash: tx.recentBlockhash,
+            lastValidBlockHeight: latestBlockHeight + 150
+          },
+          "confirmed"
+        ),
+      "confirmTransaction"
     );
 
     const result = await processPurchase(signature, buyer);
@@ -433,7 +508,6 @@ app.post("/submit-signed-transaction", rateLimit, async (req, res) => {
   }
 });
 
-// Legacy endpoint
 app.post("/buy", rateLimit, async (req, res) => {
   try {
     const { signature, buyer } = req.body;
