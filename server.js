@@ -56,6 +56,10 @@ const PRICE = Number(process.env.CARDIX_PRICE_USD);
 const DECIMALS = Number(process.env.CARDIX_DECIMALS);
 const FIXED_SOL_PRICE = 80;
 
+const WEBSITE_URL = "https://cardixfinance.com/";
+const TELEGRAM_URL = "https://t.me/CardixTG";
+const TWITTER_URL = "https://x.com/CARDIXCOIN";
+
 // Anti-spam / anti-bot
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const MAX_REQUESTS_PER_WINDOW = 20;
@@ -293,14 +297,60 @@ async function extractPurchaseData(signature, buyer) {
 
 async function sendTelegramBuyAlert(solAmount) {
   try {
-    const formattedSol = Number(solAmount).toFixed(4).replace(/\.?0+$/, "");
-    const text = `🔥 CARDIX BUY\n\n◎ ${formattedSol} SOL`;
+    const amount = Number(solAmount);
+    const formattedSol = amount.toFixed(4).replace(/\.?0+$/, "");
+
+    let text;
+
+    if (amount >= 10) {
+      text = `🐋 WHALE JUST ENTERED
+
+💰 ${formattedSol} SOL
+
+🚨 Smart money is positioning
+📈 Momentum building fast
+
+🌐 Website: ${WEBSITE_URL}
+📢 Telegram: ${TELEGRAM_URL}
+🐦 X: ${TWITTER_URL}
+
+⚠️ Early phase — don’t fade this
+
+#CARDIX #Solana`;
+    } else if (amount >= 5) {
+      text = `🔥 BIG BUY
+
+💰 ${formattedSol} SOL
+
+⚡ Strong accumulation detected
+👀 Eyes on CARDIX
+
+🌐 Website: ${WEBSITE_URL}
+📢 Telegram: ${TELEGRAM_URL}
+🐦 X: ${TWITTER_URL}
+
+#CARDIX`;
+    } else {
+      text = `🔥 CARDIX BUY
+
+💰 ${formattedSol} SOL
+
+🚀 New holder joined early
+⏳ Still undervalued
+
+🌐 BUY NOW: ${WEBSITE_URL}
+📢 Community: ${TELEGRAM_URL}
+🐦 Updates: ${TWITTER_URL}
+
+#CARDIX`;
+    }
 
     await axios.post(
       `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
       {
         chat_id: process.env.TELEGRAM_CHAT_ID,
-        text
+        text,
+        disable_web_page_preview: true
       },
       {
         timeout: 10000
