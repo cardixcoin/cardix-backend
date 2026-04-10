@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import bs58 from "bs58";
+import axios from "axios";
 import {
   Connection,
   PublicKey,
@@ -25,7 +26,9 @@ const requiredEnv = [
   "CARDIX_MINT",
   "TREASURY_WALLET",
   "CARDIX_PRICE_USD",
-  "CARDIX_DECIMALS"
+  "CARDIX_DECIMALS",
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_CHAT_ID"
 ];
 
 for (const key of requiredEnv) {
@@ -288,6 +291,31 @@ async function extractPurchaseData(signature, buyer) {
   };
 }
 
+async function sendTelegramBuyAlert(solAmount) {
+  try {
+    const formattedSol = Number(solAmount).toFixed(4).replace(/\.?0+$/, "");
+    const text = `🔥 CARDIX BUY\n\n◎ ${formattedSol} SOL`;
+
+    await axios.post(
+      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        chat_id: process.env.TELEGRAM_CHAT_ID,
+        text
+      },
+      {
+        timeout: 10000
+      }
+    );
+
+    console.log("✅ Telegram alert sent");
+  } catch (error) {
+    console.error(
+      "❌ Telegram alert error:",
+      error?.response?.data || error.message
+    );
+  }
+}
+
 async function processPurchase(signature, buyer) {
   if (processedTransactions.has(signature)) {
     throw new Error("Transaction already processed");
@@ -360,6 +388,8 @@ async function processPurchase(signature, buyer) {
     addSale(saleRecord);
 
     console.log("✅ TOKENS SENT:", tokenTx);
+
+    await sendTelegramBuyAlert(saleRecord.solAmount);
 
     return {
       success: true,
