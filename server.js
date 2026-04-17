@@ -13,7 +13,9 @@ import {
 } from "@solana/web3.js";
 import {
   getOrCreateAssociatedTokenAccount,
-  transferChecked
+  transferChecked,
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction
 } from "@solana/spl-token";
 
 const app = express();
@@ -295,6 +297,57 @@ async function extractPurchaseData(signature, buyer) {
   };
 }
 
+async function ensureBuyerTokenAccount(buyerPk) {
+  const buyerTokenAccount = await getAssociatedTokenAddress(MINT, buyerPk);
+
+  const existing = await withRpcRetry(
+    () => connection.getAccountInfo(buyerTokenAccount, "confirmed"),
+    "getAccountInfo(buyer ATA)"
+  );
+
+  if (existing) {
+    return buyerTokenAccount;
+  }
+
+  console.log("⚠️ Buyer ATA not found. Creating ATA...");
+
+  const latest = await getFreshBlockhash(true);
+
+  const createAtaTx = new Transaction({
+    feePayer: distributor.publicKey,
+    recentBlockhash: latest.blockhash
+  }).add(
+    createAssociatedTokenAccountInstruction(
+      distributor.publicKey,
+      buyerTokenAccount,
+      buyerPk,
+      MINT
+    )
+  );
+
+  const ataSignature = await withRpcRetry(
+    () => connection.sendTransaction(createAtaTx, [distributor]),
+    "sendTransaction(create ATA)"
+  );
+
+  await withRpcRetry(
+    () =>
+      connection.confirmTransaction(
+        {
+          signature: ataSignature,
+          blockhash: latest.blockhash,
+          lastValidBlockHeight: latest.lastValidBlockHeight
+        },
+        "confirmed"
+      ),
+    "confirmTransaction(create ATA)"
+  );
+
+  console.log("✅ Buyer ATA created:", buyerTokenAccount.toBase58());
+
+  return buyerTokenAccount;
+}
+
 async function sendTelegramBuyAlert(solAmount) {
   try {
     const amount = Number(solAmount);
@@ -396,16 +449,7 @@ async function processPurchase(signature, buyer) {
       "getOrCreateAssociatedTokenAccount(from)"
     );
 
-    const to = await withRpcRetry(
-      () =>
-        getOrCreateAssociatedTokenAccount(
-          connection,
-          distributor,
-          MINT,
-          buyerPk
-        ),
-      "getOrCreateAssociatedTokenAccount(to)"
-    );
+    const buyerTokenAccount = await ensureBuyerTokenAccount(buyerPk);
 
     const tokenTx = await withRpcRetry(
       () =>
@@ -414,7 +458,7 @@ async function processPurchase(signature, buyer) {
           distributor,
           from.address,
           MINT,
-          to.address,
+          buyerTokenAccount,
           distributor,
           amountToSend,
           DECIMALS
@@ -529,9 +573,9 @@ app.post("/create-transaction", rateLimit, async (req, res) => {
       lastValidBlockHeight: latest.lastValidBlockHeight
     });
   } catch (e) {
-    console.error("❌ CREATE TRANSACTION ERROR:", e.message);
+    console.error("❌ CREATE TRANSACTION ERROR FULL:", e);
     return res.status(500).json({
-      error: e.message
+      error: e?.message || "Failed to create transaction"
     });
   }
 });
@@ -581,9 +625,9 @@ app.post("/submit-signed-transaction", rateLimit, async (req, res) => {
     const result = await processPurchase(signature, buyer);
     return res.json(result);
   } catch (e) {
-    console.error("❌ SUBMIT SIGNED TRANSACTION ERROR:", e.message);
+    console.error("❌ SUBMIT SIGNED TRANSACTION ERROR FULL:", e);
     return res.status(500).json({
-      error: e.message
+      error: e?.message || "Purchase failed."
     });
   }
 });
@@ -601,9 +645,9 @@ app.post("/buy", rateLimit, async (req, res) => {
     const result = await processPurchase(signature, buyer);
     return res.json(result);
   } catch (e) {
-    console.error("❌ BUY ERROR:", e.message);
+    console.error("❌ BUY ERROR FULL:", e);
     return res.status(500).json({
-      error: e.message
+      error: e?.message || "Buy processing failed."
     });
   }
 });
