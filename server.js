@@ -58,7 +58,7 @@ const FIXED_SOL_PRICE = 80;
 
 const WEBSITE_URL = "https://cardixfinance.com/";
 const TELEGRAM_URL = "https://t.me/CardixTG";
-const TWITTER_URL = "https://x.com/CARDIXCOIN";
+const TWITTER_URL = "https://x.com/CardixFinance";
 
 // Anti-spam / anti-bot
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
@@ -560,9 +560,9 @@ app.post("/submit-signed-transaction", rateLimit, async (req, res) => {
 
     console.log("📨 Signed transaction submitted:", signature);
 
-    const latestBlockHeight = await withRpcRetry(
-      () => connection.getBlockHeight("confirmed"),
-      "getBlockHeight"
+    const latest = await withRpcRetry(
+      () => connection.getLatestBlockhash("confirmed"),
+      "getLatestBlockhash(confirm submit)"
     );
 
     await withRpcRetry(
@@ -571,7 +571,7 @@ app.post("/submit-signed-transaction", rateLimit, async (req, res) => {
           {
             signature,
             blockhash: tx.recentBlockhash,
-            lastValidBlockHeight: latestBlockHeight + 150
+            lastValidBlockHeight: latest.lastValidBlockHeight
           },
           "confirmed"
         ),
