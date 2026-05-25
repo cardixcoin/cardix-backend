@@ -24,17 +24,11 @@ import {
   createAssociatedTokenAccountInstruction
 } from "@solana/spl-token";
 
-// ─────────────────────────────────────────────────────────────
-// ESM __dirname
-// ─────────────────────────────────────────────────────────────
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// ─────────────────────────────────────────────────────────────
-// SECURITY
-// ─────────────────────────────────────────────────────────────
 app.use(cors({
   origin: [
     "https://cardixfinance.com",
@@ -45,12 +39,8 @@ app.use(cors({
 }));
 
 app.use(helmet());
-
 app.use(express.json({ limit: "2mb" }));
 
-// ─────────────────────────────────────────────────────────────
-// ENV VALIDATION
-// ─────────────────────────────────────────────────────────────
 const requiredEnv = [
   "RPC_URL",
   "DISTRIBUTOR_PRIVATE_KEY",
@@ -68,197 +58,93 @@ for (const key of requiredEnv) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// SOLANA
-// ─────────────────────────────────────────────────────────────
-const connection = new Connection(
-  process.env.RPC_URL,
-  "confirmed"
-);
+const connection = new Connection(process.env.RPC_URL, "confirmed");
 
 let distributor;
 
 try {
   distributor = Keypair.fromSecretKey(
-    bs58.decode(
-      process.env.DISTRIBUTOR_PRIVATE_KEY.trim()
-    )
+    bs58.decode(process.env.DISTRIBUTOR_PRIVATE_KEY.trim())
   );
-
-  console.log(
-    "✅ Distributor wallet:",
-    distributor.publicKey.toBase58()
-  );
+  console.log("✅ Distributor wallet:", distributor.publicKey.toBase58());
 } catch (err) {
-  console.error(
-    "❌ INVALID DISTRIBUTOR_PRIVATE_KEY"
-  );
-
+  console.error("❌ INVALID DISTRIBUTOR_PRIVATE_KEY");
   throw err;
 }
 
-const MINT = new PublicKey(
-  process.env.CARDIX_MINT
-);
+const MINT = new PublicKey(process.env.CARDIX_MINT);
+const TREASURY = new PublicKey(process.env.TREASURY_WALLET);
 
-const TREASURY = new PublicKey(
-  process.env.TREASURY_WALLET
-);
-
-const PRICE = Number(
-  process.env.CARDIX_PRICE_USD
-);
-
-const DECIMALS = Number(
-  process.env.CARDIX_DECIMALS
-);
+const PRICE = Number(process.env.CARDIX_PRICE_USD);
+const DECIMALS = Number(process.env.CARDIX_DECIMALS);
 
 if (!Number.isFinite(PRICE) || PRICE <= 0) {
-  throw new Error(
-    "Invalid CARDIX_PRICE_USD"
-  );
+  throw new Error("Invalid CARDIX_PRICE_USD");
 }
 
-if (
-  !Number.isInteger(DECIMALS) ||
-  DECIMALS < 0 ||
-  DECIMALS > 18
-) {
-  throw new Error(
-    "Invalid CARDIX_DECIMALS"
-  );
+if (!Number.isInteger(DECIMALS) || DECIMALS < 0 || DECIMALS > 18) {
+  throw new Error("Invalid CARDIX_DECIMALS");
 }
 
-// 1 SOL = 800,000 CARDIX
 const FIXED_SOL_PRICE = 80;
-
 const MIN_SOL_AMOUNT = 0.01;
 const MAX_SOL_AMOUNT = 100;
 
-const WEBSITE_URL =
-  "https://cardixfinance.com/";
+const WEBSITE_URL = "https://cardixfinance.com/";
+const TELEGRAM_URL = "https://t.me/CardixTG";
+const TWITTER_URL = "https://x.com/CardixFinance";
 
-const TELEGRAM_URL =
-  "https://t.me/CardixTG";
-
-const TWITTER_URL =
-  "https://x.com/CardixFinance";
-
-// ─────────────────────────────────────────────────────────────
-// RATE LIMIT
-// ─────────────────────────────────────────────────────────────
-const RATE_LIMIT_WINDOW_MS =
-  60 * 1000;
-
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const MAX_REQUESTS_PER_WINDOW = 20;
-
 const MAX_CREATE_TX_PER_WINDOW = 10;
+const DUPLICATE_REQUEST_WINDOW_MS = 30 * 1000;
 
-const DUPLICATE_REQUEST_WINDOW_MS =
-  30 * 1000;
-
-// ─────────────────────────────────────────────────────────────
-// BLOCKHASH CACHE
-// ─────────────────────────────────────────────────────────────
 const BLOCKHASH_CACHE_MS = 10000;
-
 let cachedBlockhash = null;
 let cachedBlockhashAt = 0;
 
-// ─────────────────────────────────────────────────────────────
-// PERSISTENT STORAGE
-// ─────────────────────────────────────────────────────────────
-const DATA_DIR = path.join(
-  __dirname,
-  "data"
-);
-
-const SALES_FILE = path.join(
-  DATA_DIR,
-  "sales.json"
-);
-
-const PROCESSED_TX_FILE = path.join(
-  DATA_DIR,
-  "processed_tx.json"
-);
+const DATA_DIR = path.join(__dirname, "data");
+const SALES_FILE = path.join(DATA_DIR, "sales.json");
+const PROCESSED_TX_FILE = path.join(DATA_DIR, "processed_tx.json");
 
 if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, {
-    recursive: true
-  });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
 let sales = [];
 
 try {
   if (fs.existsSync(SALES_FILE)) {
-    sales = JSON.parse(
-      fs.readFileSync(
-        SALES_FILE,
-        "utf8"
-      )
-    );
-
-    console.log(
-      `✅ Loaded ${sales.length} sales`
-    );
+    sales = JSON.parse(fs.readFileSync(SALES_FILE, "utf8"));
+    console.log(`✅ Loaded ${sales.length} sales`);
   }
 } catch (err) {
-  console.warn(
-    "⚠️ Failed loading sales:",
-    err.message
-  );
-
+  console.warn("⚠️ Failed loading sales:", err.message);
   sales = [];
 }
 
 let processedTransactionsSet = new Set();
 
 try {
-  if (
-    fs.existsSync(PROCESSED_TX_FILE)
-  ) {
-    const arr = JSON.parse(
-      fs.readFileSync(
-        PROCESSED_TX_FILE,
-        "utf8"
-      )
-    );
-
-    processedTransactionsSet =
-      new Set(arr);
-
-    console.log(
-      `✅ Loaded ${processedTransactionsSet.size} processed tx`
-    );
+  if (fs.existsSync(PROCESSED_TX_FILE)) {
+    const arr = JSON.parse(fs.readFileSync(PROCESSED_TX_FILE, "utf8"));
+    processedTransactionsSet = new Set(arr);
+    console.log(`✅ Loaded ${processedTransactionsSet.size} processed tx`);
   }
 } catch (err) {
-  console.warn(
-    "⚠️ Failed loading processed tx:",
-    err.message
-  );
-
-  processedTransactionsSet =
-    new Set();
+  console.warn("⚠️ Failed loading processed tx:", err.message);
+  processedTransactionsSet = new Set();
 }
 
 function persistSales() {
   try {
     fs.writeFileSync(
       SALES_FILE,
-      JSON.stringify(
-        sales.slice(0, 1000),
-        null,
-        2
-      ),
+      JSON.stringify(sales.slice(0, 1000), null, 2),
       "utf8"
     );
   } catch (err) {
-    console.error(
-      "❌ Failed persisting sales:",
-      err.message
-    );
+    console.error("❌ Failed persisting sales:", err.message);
   }
 }
 
@@ -266,119 +152,69 @@ function persistProcessedTx() {
   try {
     fs.writeFileSync(
       PROCESSED_TX_FILE,
-      JSON.stringify(
-        [...processedTransactionsSet],
-        null,
-        2
-      ),
+      JSON.stringify([...processedTransactionsSet], null, 2),
       "utf8"
     );
   } catch (err) {
-    console.error(
-      "❌ Failed persisting tx:",
-      err.message
-    );
+    console.error("❌ Failed persisting tx:", err.message);
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// MEMORY STORES
-// ─────────────────────────────────────────────────────────────
-const inProgressTransactions =
-  new Set();
-
+const inProgressTransactions = new Set();
 const rateLimitStore = new Map();
+const recentCreateRequests = new Map();
 
-const recentCreateRequests =
-  new Map();
-
-// ─────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────
 function sleep(ms) {
-  return new Promise((resolve) =>
-    setTimeout(resolve, ms)
-  );
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function getClientIp(req) {
-  const xff =
-    req.headers["x-forwarded-for"];
+  const xff = req.headers["x-forwarded-for"];
 
-  if (
-    typeof xff === "string" &&
-    xff.length > 0
-  ) {
+  if (typeof xff === "string" && xff.length > 0) {
     return xff.split(",")[0].trim();
   }
 
-  return (
-    req.socket.remoteAddress ||
-    "unknown"
-  );
+  return req.socket.remoteAddress || "unknown";
 }
 
 function isRateLimitError(error) {
-  const msg = String(
-    error?.message || error || ""
-  ).toLowerCase();
+  const msg = String(error?.message || error || "").toLowerCase();
 
-  return (
-    msg.includes("429") ||
-    msg.includes("too many requests")
-  );
+  return msg.includes("429") || msg.includes("too many requests");
 }
 
-async function withRpcRetry(
-  fn,
-  label = "RPC"
-) {
+async function withRpcRetry(fn, label = "RPC") {
   const delays = [500, 1200, 2500];
 
   for (let i = 0; i <= delays.length; i++) {
     try {
       return await fn();
     } catch (error) {
-      if (
-        !isRateLimitError(error) ||
-        i === delays.length
-      ) {
-        console.error(
-          `❌ ${label} failed:`,
-          error?.message || error
-        );
-
+      if (!isRateLimitError(error) || i === delays.length) {
+        console.error(`❌ ${label} failed:`, error?.message || error);
         throw error;
       }
 
-      console.warn(
-        `⚠️ ${label} rate limited. Retry ${i + 1}/${delays.length}`
-      );
-
+      console.warn(`⚠️ ${label} rate limited. Retry ${i + 1}/${delays.length}`);
       await sleep(delays[i]);
     }
   }
 }
 
-async function getFreshBlockhash(
-  forceRefresh = false
-) {
+async function getFreshBlockhash(forceRefresh = false) {
   const now = Date.now();
 
   if (
     !forceRefresh &&
     cachedBlockhash &&
-    now - cachedBlockhashAt <
-      BLOCKHASH_CACHE_MS
+    now - cachedBlockhashAt < BLOCKHASH_CACHE_MS
   ) {
     return cachedBlockhash;
   }
 
   const latest = await withRpcRetry(
-    () =>
-      connection.getLatestBlockhash(
-        "confirmed"
-      ),
+    () => connection.getLatestBlockhash("confirmed"),
     "getLatestBlockhash"
   );
 
@@ -388,33 +224,22 @@ async function getFreshBlockhash(
   return latest;
 }
 
-async function getConfirmedTransaction(
-  signature,
-  timeoutMs = 90000
-) {
+async function getConfirmedTransaction(signature, timeoutMs = 90000) {
   const start = Date.now();
 
-  while (
-    Date.now() - start <
-    timeoutMs
-  ) {
+  while (Date.now() - start < timeoutMs) {
     const tx = await withRpcRetry(
       () =>
-        connection.getTransaction(
-          signature,
-          {
-            commitment: "confirmed",
-            maxSupportedTransactionVersion: 0
-          }
-        ),
+        connection.getTransaction(signature, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0
+        }),
       "getTransaction"
     );
 
     if (tx) {
       if (tx.meta?.err) {
-        throw new Error(
-          "Transaction failed on-chain"
-        );
+        throw new Error("Transaction failed on-chain");
       }
 
       return tx;
@@ -423,19 +248,14 @@ async function getConfirmedTransaction(
     await sleep(1500);
   }
 
-  throw new Error(
-    "Transaction confirmation timeout"
-  );
+  throw new Error("Transaction confirmation timeout");
 }
 
 function cleanupRateStore() {
   const now = Date.now();
 
   for (const [ip, data] of rateLimitStore.entries()) {
-    if (
-      now - data.windowStart >
-      RATE_LIMIT_WINDOW_MS
-    ) {
+    if (now - data.windowStart > RATE_LIMIT_WINDOW_MS) {
       rateLimitStore.delete(ip);
     }
   }
@@ -451,91 +271,56 @@ function rateLimit(req, res, next) {
     rateLimitStore.set(ip, {
       windowStart: now,
       count: 1,
-      createTxCount:
-        req.path === "/create-transaction"
-          ? 1
-          : 0
+      createTxCount: req.path === "/create-transaction" ? 1 : 0
     });
 
     return next();
   }
 
-  const entry =
-    rateLimitStore.get(ip);
+  const entry = rateLimitStore.get(ip);
 
-  if (
-    now - entry.windowStart >
-    RATE_LIMIT_WINDOW_MS
-  ) {
+  if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
     entry.windowStart = now;
     entry.count = 1;
-    entry.createTxCount =
-      req.path === "/create-transaction"
-        ? 1
-        : 0;
+    entry.createTxCount = req.path === "/create-transaction" ? 1 : 0;
 
     return next();
   }
 
   entry.count += 1;
 
-  if (
-    req.path ===
-    "/create-transaction"
-  ) {
+  if (req.path === "/create-transaction") {
     entry.createTxCount += 1;
   }
 
-  if (
-    entry.count >
-    MAX_REQUESTS_PER_WINDOW
-  ) {
+  if (entry.count > MAX_REQUESTS_PER_WINDOW) {
     return res.status(429).json({
-      error:
-        "Too many requests. Please slow down."
+      error: "Too many requests. Please slow down."
     });
   }
 
-  if (
-    entry.createTxCount >
-    MAX_CREATE_TX_PER_WINDOW
-  ) {
+  if (entry.createTxCount > MAX_CREATE_TX_PER_WINDOW) {
     return res.status(429).json({
-      error:
-        "Too many transaction creation attempts."
+      error: "Too many transaction creation attempts."
     });
   }
 
   return next();
 }
 
-function blockDuplicateCreateRequest(
-  ip,
-  buyer,
-  amount
-) {
+function blockDuplicateCreateRequest(ip, buyer, amount) {
   const key = `${ip}:${buyer}:${amount}`;
-
   const now = Date.now();
+  const last = recentCreateRequests.get(key);
 
-  const last =
-    recentCreateRequests.get(key);
-
-  if (
-    last &&
-    now - last <
-      DUPLICATE_REQUEST_WINDOW_MS
-  ) {
+  if (last && now - last < DUPLICATE_REQUEST_WINDOW_MS) {
     return true;
   }
 
   recentCreateRequests.set(key, now);
 
   for (const [k, ts] of recentCreateRequests.entries()) {
-    if (
-      now - ts >
-      DUPLICATE_REQUEST_WINDOW_MS
-    ) {
+    if (now - ts > DUPLICATE_REQUEST_WINDOW_MS) {
       recentCreateRequests.delete(k);
     }
   }
@@ -544,17 +329,11 @@ function blockDuplicateCreateRequest(
 }
 
 function maskWallet(address) {
-  if (
-    !address ||
-    address.length < 10
-  ) {
+  if (!address || address.length < 10) {
     return address || "";
   }
 
-  return `${address.slice(
-    0,
-    4
-  )}...${address.slice(-4)}`;
+  return `${address.slice(0, 4)}...${address.slice(-4)}`;
 }
 
 function addSale(record) {
@@ -569,104 +348,58 @@ function addSale(record) {
 
 function getStats() {
   const totalSol = sales.reduce(
-    (sum, s) =>
-      sum + Number(s.solAmount || 0),
+    (sum, s) => sum + Number(s.solAmount || 0),
     0
   );
 
   const totalTokens = sales.reduce(
-    (sum, s) =>
-      sum + Number(s.tokens || 0),
+    (sum, s) => sum + Number(s.tokens || 0),
     0
   );
 
   return {
     success: true,
     totalPurchases: sales.length,
-    totalSolRaised: Number(
-      totalSol.toFixed(6)
-    ),
-    totalTokensSold: Number(
-      totalTokens.toFixed(2)
-    ),
+    totalSolRaised: Number(totalSol.toFixed(6)),
+    totalTokensSold: Number(totalTokens.toFixed(2)),
     latestSales: sales.slice(0, 10)
   };
 }
 
-async function extractPurchaseData(
-  signature,
-  buyer
-) {
-  const tx =
-    await getConfirmedTransaction(
-      signature
-    );
+async function extractPurchaseData(signature, buyer) {
+  const tx = await getConfirmedTransaction(signature);
+  const buyerPk = new PublicKey(buyer);
 
-  const buyerPk =
-    new PublicKey(buyer);
+  const accountKeys = tx.transaction.message.getAccountKeys().staticAccountKeys;
 
-  const accountKeys =
-    tx.transaction.message.getAccountKeys()
-      .staticAccountKeys;
-
-  const buyerIndex =
-    accountKeys.findIndex((k) =>
-      k.equals(buyerPk)
-    );
-
-  const treasuryIndex =
-    accountKeys.findIndex((k) =>
-      k.equals(TREASURY)
-    );
+  const buyerIndex = accountKeys.findIndex((k) => k.equals(buyerPk));
+  const treasuryIndex = accountKeys.findIndex((k) => k.equals(TREASURY));
 
   if (buyerIndex === -1) {
-    throw new Error(
-      "Buyer wallet not found"
-    );
+    throw new Error("Buyer wallet not found");
   }
 
   if (treasuryIndex === -1) {
-    throw new Error(
-      "Treasury wallet not found"
-    );
+    throw new Error("Treasury wallet not found");
   }
 
   const receivedLamports =
-    tx.meta.postBalances[
-      treasuryIndex
-    ] -
-    tx.meta.preBalances[
-      treasuryIndex
-    ];
+    tx.meta.postBalances[treasuryIndex] - tx.meta.preBalances[treasuryIndex];
 
   if (receivedLamports <= 0) {
-    throw new Error(
-      "No SOL received"
-    );
+    throw new Error("No SOL received");
   }
 
-  const solAmount =
-    receivedLamports /
-    LAMPORTS_PER_SOL;
-
-  const usdValue =
-    solAmount *
-    FIXED_SOL_PRICE;
-
-  const tokens =
-    usdValue / PRICE;
+  const solAmount = receivedLamports / LAMPORTS_PER_SOL;
+  const usdValue = solAmount * FIXED_SOL_PRICE;
+  const tokens = usdValue / PRICE;
 
   const amountToSend = BigInt(
-    Math.floor(
-      tokens *
-        10 ** DECIMALS
-    )
+    Math.floor(tokens * 10 ** DECIMALS)
   );
 
   if (amountToSend <= 0n) {
-    throw new Error(
-      "Token amount is zero"
-    );
+    throw new Error("Token amount is zero");
   }
 
   return {
@@ -678,89 +411,55 @@ async function extractPurchaseData(
   };
 }
 
-async function ensureBuyerTokenAccount(
-  buyerPk
-) {
-  const buyerTokenAccount =
-    await getAssociatedTokenAddress(
-      MINT,
-      buyerPk
-    );
+async function ensureBuyerTokenAccount(buyerPk) {
+  const buyerTokenAccount = await getAssociatedTokenAddress(MINT, buyerPk);
 
-  const existing =
-    await withRpcRetry(
-      () =>
-        connection.getAccountInfo(
-          buyerTokenAccount,
-          "confirmed"
-        ),
-      "getAccountInfo buyer ATA"
-    );
+  const existing = await withRpcRetry(
+    () => connection.getAccountInfo(buyerTokenAccount, "confirmed"),
+    "getAccountInfo buyer ATA"
+  );
 
   if (existing) {
     return buyerTokenAccount;
   }
 
-  console.log(
-    "⚠️ Creating buyer ATA..."
+  console.log("⚠️ Creating buyer ATA...");
+
+  const latest = await getFreshBlockhash(true);
+
+  const createAtaTx = new Transaction({
+    feePayer: distributor.publicKey,
+    recentBlockhash: latest.blockhash
+  }).add(
+    createAssociatedTokenAccountInstruction(
+      distributor.publicKey,
+      buyerTokenAccount,
+      buyerPk,
+      MINT
+    )
   );
 
-  const latest =
-    await getFreshBlockhash(true);
-
-  const createAtaTx =
-    new Transaction({
-      feePayer:
-        distributor.publicKey,
-      recentBlockhash:
-        latest.blockhash
-    }).add(
-      createAssociatedTokenAccountInstruction(
-        distributor.publicKey,
-        buyerTokenAccount,
-        buyerPk,
-        MINT
-      )
-    );
-
-  const ataSignature =
-    await withRpcRetry(
-      () =>
-        connection.sendTransaction(
-          createAtaTx,
-          [distributor]
-        ),
-      "sendTransaction ATA"
-    );
-
-  await getConfirmedTransaction(
-    ataSignature
+  const ataSignature = await withRpcRetry(
+    () => connection.sendTransaction(createAtaTx, [distributor]),
+    "sendTransaction ATA"
   );
 
-  console.log(
-    "✅ Buyer ATA created"
-  );
+  await getConfirmedTransaction(ataSignature);
+
+  console.log("✅ Buyer ATA created");
 
   return buyerTokenAccount;
 }
 
-async function sendTelegramBuyAlert(
-  solAmount
-) {
+async function sendTelegramBuyAlert(solAmount) {
   try {
-    const amount =
-      Number(solAmount);
-
-    const formattedSol =
-      amount
-        .toFixed(4)
-        .replace(/\.?0+$/, "");
+    const amount = Number(solAmount);
+    const formattedSol = amount.toFixed(4).replace(/\.?0+$/, "");
 
     let text;
 
     if (amount >= 10) {
-      text =
-`🐋 LARGE PURCHASE — CARDIX
+      text = `🐋 LARGE PURCHASE — CARDIX
 
 💰 ${formattedSol} SOL
 
@@ -770,8 +469,7 @@ async function sendTelegramBuyAlert(
 
 #CARDIX #Solana #CDX`;
     } else if (amount >= 5) {
-      text =
-`🔥 NEW PURCHASE — CARDIX
+      text = `🔥 NEW PURCHASE — CARDIX
 
 💰 ${formattedSol} SOL
 
@@ -781,8 +479,7 @@ async function sendTelegramBuyAlert(
 
 #CARDIX #CDX`;
     } else {
-      text =
-`✅ NEW PURCHASE — CARDIX
+      text = `✅ NEW PURCHASE — CARDIX
 
 💰 ${formattedSol} SOL
 
@@ -796,9 +493,7 @@ async function sendTelegramBuyAlert(
     await axios.post(
       `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
       {
-        chat_id:
-          process.env
-            .TELEGRAM_CHAT_ID,
+        chat_id: process.env.TELEGRAM_CHAT_ID,
         text,
         disable_web_page_preview: true
       },
@@ -807,167 +502,98 @@ async function sendTelegramBuyAlert(
       }
     );
 
-    console.log(
-      "✅ Telegram alert sent"
-    );
+    console.log("✅ Telegram alert sent");
   } catch (error) {
     console.error(
       "❌ Telegram alert error:",
-      error?.response?.data ||
-        error.message
+      error?.response?.data || error.message
     );
   }
 }
 
-async function processPurchase(
-  signature,
-  buyer
-) {
-  if (
-    processedTransactionsSet.has(
-      signature
-    )
-  ) {
-    throw new Error(
-      "Transaction already processed"
-    );
+async function processPurchase(signature, buyer) {
+  if (processedTransactionsSet.has(signature)) {
+    throw new Error("Transaction already processed");
   }
 
-  if (
-    inProgressTransactions.has(
-      signature
-    )
-  ) {
-    throw new Error(
-      "Transaction already processing"
-    );
+  if (inProgressTransactions.has(signature)) {
+    throw new Error("Transaction already processing");
   }
 
-  inProgressTransactions.add(
-    signature
-  );
+  inProgressTransactions.add(signature);
 
   try {
-    const {
-      buyerPk,
-      solAmount,
-      usdValue,
-      tokens,
-      amountToSend
-    } =
-      await extractPurchaseData(
-        signature,
-        buyer
-      );
+    const { buyerPk, solAmount, usdValue, tokens, amountToSend } =
+      await extractPurchaseData(signature, buyer);
 
-    const from =
-      await withRpcRetry(
-        () =>
-          getOrCreateAssociatedTokenAccount(
-            connection,
-            distributor,
-            MINT,
-            distributor.publicKey
-          ),
-        "getOrCreateATA distributor"
-      );
-
-    const buyerTokenAccount =
-      await ensureBuyerTokenAccount(
-        buyerPk
-      );
-
-    const tokenTx =
-      await withRpcRetry(
-        () =>
-          transferChecked(
-            connection,
-            distributor,
-            from.address,
-            MINT,
-            buyerTokenAccount,
-            distributor,
-            amountToSend,
-            DECIMALS
-          ),
-        "transferChecked"
-      );
-
-    processedTransactionsSet.add(
-      signature
+    const from = await withRpcRetry(
+      () =>
+        getOrCreateAssociatedTokenAccount(
+          connection,
+          distributor,
+          MINT,
+          distributor.publicKey
+        ),
+      "getOrCreateATA distributor"
     );
 
+    const buyerTokenAccount = await ensureBuyerTokenAccount(buyerPk);
+
+    const tokenTx = await withRpcRetry(
+      () =>
+        transferChecked(
+          connection,
+          distributor,
+          from.address,
+          MINT,
+          buyerTokenAccount,
+          distributor,
+          amountToSend,
+          DECIMALS
+        ),
+      "transferChecked"
+    );
+
+    processedTransactionsSet.add(signature);
     persistProcessedTx();
 
     const saleRecord = {
-      buyer:
-        buyerPk.toBase58(),
-      buyerMasked:
-        maskWallet(
-          buyerPk.toBase58()
-        ),
-      paymentSignature:
-        signature,
-      tokenSignature:
-        tokenTx,
-      solAmount: Number(
-        solAmount.toFixed(6)
-      ),
-      usdValue: Number(
-        usdValue.toFixed(2)
-      ),
-      tokens: Number(
-        tokens.toFixed(2)
-      ),
-      timestamp:
-        new Date().toISOString()
+      buyer: buyerPk.toBase58(),
+      buyerMasked: maskWallet(buyerPk.toBase58()),
+      paymentSignature: signature,
+      tokenSignature: tokenTx,
+      solAmount: Number(solAmount.toFixed(6)),
+      usdValue: Number(usdValue.toFixed(2)),
+      tokens: Number(tokens.toFixed(2)),
+      timestamp: new Date().toISOString()
     };
 
     addSale(saleRecord);
 
-    await sendTelegramBuyAlert(
-      saleRecord.solAmount
-    );
+    await sendTelegramBuyAlert(saleRecord.solAmount);
 
-    console.log(
-      "✅ TOKENS SENT:",
-      tokenTx
-    );
+    console.log("✅ TOKENS SENT:", tokenTx);
 
     return {
       success: true,
-      paymentSignature:
-        signature,
-      tokenSignature:
-        tokenTx,
-      solAmount:
-        saleRecord.solAmount,
-      solPrice:
-        FIXED_SOL_PRICE,
-      usdValue:
-        saleRecord.usdValue,
-      tokens:
-        saleRecord.tokens
+      paymentSignature: signature,
+      tokenSignature: tokenTx,
+      solAmount: saleRecord.solAmount,
+      solPrice: FIXED_SOL_PRICE,
+      usdValue: saleRecord.usdValue,
+      tokens: saleRecord.tokens
     };
   } finally {
-    inProgressTransactions.delete(
-      signature
-    );
+    inProgressTransactions.delete(signature);
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// ROUTES
-// ─────────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
-    message:
-      "CARDIX backend running",
-    network:
-      "Solana Mainnet",
-    timestamp:
-      new Date().toISOString()
+    message: "CARDIX backend running",
+    network: "Solana Mainnet",
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -975,175 +601,132 @@ app.get("/stats", (_req, res) => {
   res.json(getStats());
 });
 
-app.post(
-  "/create-transaction",
-  rateLimit,
-  async (req, res) => {
-    try {
-      const {
-        buyer,
-        amount
-      } = req.body;
+app.post("/create-transaction", rateLimit, async (req, res) => {
+  try {
+    const { buyer, amount } = req.body;
+    const ip = getClientIp(req);
 
-      const ip =
-        getClientIp(req);
-
-      if (
-        !buyer ||
-        amount === undefined ||
-        amount === null
-      ) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "buyer and amount are required"
-          });
-      }
-
-      let buyerPk;
-
-      try {
-        buyerPk =
-          new PublicKey(
-            buyer
-          );
-      } catch {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Invalid buyer wallet"
-          });
-      }
-
-      const solAmount =
-        Number(amount);
-
-      if (
-        !Number.isFinite(
-          solAmount
-        ) ||
-        solAmount <= 0
-      ) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Invalid SOL amount"
-          });
-      }
-
-      if (
-        solAmount <
-        MIN_SOL_AMOUNT
-      ) {
-        return res
-          .status(400)
-          .json({
-            error:
-              `Minimum purchase is ${MIN_SOL_AMOUNT} SOL`
-          });
-      }
-
-      if (
-        solAmount >
-        MAX_SOL_AMOUNT
-      ) {
-        return res
-          .status(400)
-          .json({
-            error:
-              `Maximum purchase is ${MAX_SOL_AMOUNT} SOL`
-          });
-      }
-
-      if (
-        blockDuplicateCreateRequest(
-          ip,
-          buyerPk.toBase58(),
-          solAmount
-        )
-      ) {
-        return res
-          .status(429)
-          .json({
-            error:
-              "Duplicate request detected"
-          });
-      }
-
-      const latest =
-        await getFreshBlockhash();
-
-      const tx =
-        new Transaction({
-          feePayer:
-            buyerPk,
-          recentBlockhash:
-            latest.blockhash
-        }).add(
-          SystemProgram.transfer(
-            {
-              fromPubkey:
-                buyerPk,
-              toPubkey:
-                TREASURY,
-              lamports:
-                Math.floor(
-                  solAmount *
-                    LAMPORTS_PER_SOL
-                )
-            }
-          )
-        );
-
-      const serialized =
-        tx.serialize({
-          requireAllSignatures: false,
-          verifySignatures: false
-        });
-
-      return res.json({
-        success: true,
-        transaction:
-          serialized.toString(
-            "base64"
-          ),
-        blockhash:
-          latest.blockhash,
-        lastValidBlockHeight:
-          latest.lastValidBlockHeight
+    if (!buyer || amount === undefined || amount === null) {
+      return res.status(400).json({
+        error: "buyer and amount are required"
       });
-    } catch (e) {
-      console.error(
-        "❌ CREATE TX ERROR:",
-        e
-      );
-
-      return res
-        .status(500)
-        .json({
-          error:
-            e?.message ||
-            "Failed to create transaction"
-        });
     }
-  }
-);
 
-app.post(
-  "/submit-signed-transaction",
-  rateLimit,
-  async (req, res) => {
+    let buyerPk;
+
     try {
-      const {
-        signedTransaction,
-        buyer
-      } = req.body;
+      buyerPk = new PublicKey(buyer);
+    } catch {
+      return res.status(400).json({
+        error: "Invalid buyer wallet"
+      });
+    }
 
-      if (
-        !signedTransaction ||
-        !buyer
-      ) {
-      
+    const solAmount = Number(amount);
+
+    if (!Number.isFinite(solAmount) || solAmount <= 0) {
+      return res.status(400).json({
+        error: "Invalid SOL amount"
+      });
+    }
+
+    if (solAmount < MIN_SOL_AMOUNT) {
+      return res.status(400).json({
+        error: `Minimum purchase is ${MIN_SOL_AMOUNT} SOL`
+      });
+    }
+
+    if (solAmount > MAX_SOL_AMOUNT) {
+      return res.status(400).json({
+        error: `Maximum purchase is ${MAX_SOL_AMOUNT} SOL`
+      });
+    }
+
+    if (blockDuplicateCreateRequest(ip, buyerPk.toBase58(), solAmount)) {
+      return res.status(429).json({
+        error: "Duplicate request detected"
+      });
+    }
+
+    const latest = await getFreshBlockhash();
+
+    const tx = new Transaction({
+      feePayer: buyerPk,
+      recentBlockhash: latest.blockhash
+    }).add(
+      SystemProgram.transfer({
+        fromPubkey: buyerPk,
+        toPubkey: TREASURY,
+        lamports: Math.floor(solAmount * LAMPORTS_PER_SOL)
+      })
+    );
+
+    const serialized = tx.serialize({
+      requireAllSignatures: false,
+      verifySignatures: false
+    });
+
+    return res.json({
+      success: true,
+      transaction: serialized.toString("base64"),
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight
+    });
+  } catch (e) {
+    console.error("❌ CREATE TX ERROR:", e);
+
+    return res.status(500).json({
+      error: e?.message || "Failed to create transaction"
+    });
+  }
+});
+
+app.post("/submit-signed-transaction", rateLimit, async (req, res) => {
+  try {
+    const { signedTransaction, buyer } = req.body;
+
+    if (!signedTransaction || !buyer) {
+      return res.status(400).json({
+        error: "signedTransaction and buyer are required"
+      });
+    }
+
+    try {
+      new PublicKey(buyer);
+    } catch {
+      return res.status(400).json({
+        error: "Invalid buyer wallet"
+      });
+    }
+
+    const rawTx = Buffer.from(signedTransaction, "base64");
+
+    const signature = await withRpcRetry(
+      () =>
+        connection.sendRawTransaction(rawTx, {
+          skipPreflight: false,
+          preflightCommitment: "confirmed"
+        }),
+      "sendRawTransaction"
+    );
+
+    console.log("📨 Submitted:", signature);
+
+    const result = await processPurchase(signature, buyer);
+
+    return res.json(result);
+  } catch (e) {
+    console.error("❌ SUBMIT TX ERROR:", e);
+
+    return res.status(500).json({
+      error: e?.message || "Purchase failed"
+    });
+  }
+});
+
+app.listen(process.env.PORT || 10000, () => {
+  console.log(
+    "🚀 CARDIX backend running on port",
+    process.env.PORT || 10000
+  );
+});
